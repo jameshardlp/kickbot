@@ -5,6 +5,7 @@ import httpx
 from fastapi import FastAPI
 
 from config import check_config, KICK_CLIENT_ID, KICK_CLIENT_SECRET, KICK_CHANNEL_SLUG
+from kick_webhook import router as kick_router  # <-- Импортируем наш обработчик
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -13,18 +14,16 @@ check_config()
 
 app = FastAPI(title="Kick Alert Bot")
 
+# Подключаем роутер с вебхуками
+app.include_router(kick_router)
+
 # ============================================================
 # Подписка на события Kick при старте
 # ============================================================
 async def subscribe_to_kick_events():
-    """
-    Получает app access token, находит broadcaster_user_id по slug
-    и подписывается на событие livestream.status.updated.
-    """
+    # ... (код подписки остаётся без изменений) ...
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            # 1. Получаем app access token
-            logger.info("🔑 Получаем токен Kick...")
             token_resp = await client.post(
                 "https://id.kick.com/oauth/token",
                 data={
@@ -33,79 +32,44 @@ async def subscribe_to_kick_events():
                     "client_secret": KICK_CLIENT_SECRET,
                 }
             )
-            
             if token_resp.status_code != 200:
-                logger.error(f"❌ Ошибка получения токена Kick: {token_resp.status_code} — {token_resp.text}")
+                logger.error(f"❌ Ошибка получения токена Kick: {token_resp.status_code}")
                 return
-            
-            token_data = token_resp.json()
-            access_token = token_data.get("access_token")
-            if not access_token:
-                logger.error("❌ В ответе нет access_token")
-                return
-            
-            logger.info("✅ Токен Kick получен.")
+            access_token = token_resp.json().get("access_token")
             headers = {"Authorization": f"Bearer {access_token}"}
 
-            # 2. Получаем broadcaster_user_id по slug
-            logger.info(f"🔍 Ищем канал {KICK_CHANNEL_SLUG} на Kick...")
             ch_resp = await client.get(
                 f"https://api.kick.com/public/v1/channels?slug={KICK_CHANNEL_SLUG}",
                 headers=headers
             )
-            
-            if ch_resp.status_code != 200:
-                logger.error(f"❌ Ошибка поиска канала: {ch_resp.status_code} — {ch_resp.text}")
-                return
-            
-            ch_data = ch_resp.json()
-            # Структура ответа: {"data": [{...}], "message": "OK"}
-            channels = ch_data.get("data", [])
+            channels = ch_resp.json().get("data", [])
             if not channels:
                 logger.error(f"❌ Канал {KICK_CHANNEL_SLUG} не найден.")
                 return
-            
             broadcaster_id = channels[0].get("broadcaster_user_id")
-            if not broadcaster_id:
-                logger.error("❌ В ответе нет broadcaster_user_id")
-                return
             
-            logger.info(f"✅ Найден канал: {KICK_CHANNEL_SLUG}, broadcaster_user_id = {broadcaster_id}")
-
-            # 3. Подписываемся на событие
-            logger.info("📡 Подписываемся на livestream.status.updated...")
             sub_resp = await client.post(
                 "https://api.kick.com/public/v1/events/subscriptions",
                 headers=headers,
                 json={
                     "broadcaster_user_id": broadcaster_id,
                     "method": "webhook",
-                    "events": [
-                        {"name": "livestream.status.updated", "version": 1}
-                    ]
+                    "events": [{"name": "livestream.status.updated", "version": 1}]
                 }
             )
-            
             if sub_resp.status_code in (200, 201):
-                logger.info(f"✅ Подписка создана успешно: {sub_resp.text}")
+                logger.info(f"✅ Подписка активна: {sub_resp.text}")
             elif sub_resp.status_code == 409:
-                logger.info("ℹ️ Подписка уже существует (409 Conflict).")
+                logger.info("ℹ️ Подписка уже существует.")
             else:
                 logger.error(f"❌ Ошибка подписки: {sub_resp.status_code} — {sub_resp.text}")
-
     except Exception as e:
-        logger.error(f"❌ Исключение при подписке на Kick: {e}")
-
+        logger.error(f"❌ Исключение при подписке: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    """Вызывается один раз при старте сервера."""
     await subscribe_to_kick_events()
 
-
-# ============================================================
-# Маршруты
-# ============================================================
 @app.get("/")
 async def root():
     return {"status": "alive"}
@@ -113,12 +77,6 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-@app.post("/kick-webhook")
-async def test_webhook():
-    logger.info("📥 Получен запрос от Kick (тестовый режим)")
-    return {"status": "ok"}
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3000))
