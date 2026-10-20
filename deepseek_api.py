@@ -6,22 +6,25 @@ logger = logging.getLogger(__name__)
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
-async def generate_post(stream_title: str, viewer_count: int = 0) -> str:
+async def generate_post(stream_title: str, viewer_count: int = 0, slug: str = None) -> str:
     """
     Генерирует пост про начало стрима в стиле автора канала maddysontg.
-    Возвращает текст поста или пустую строку при ошибке.
+    В начале поста добавляет ссылку на канал стримера.
     """
     if not DEEPSEEK_API_KEY:
         logger.error("❌ Нет DEEPSEEK_API_KEY")
         return ""
 
-    # Формируем системный промпт с характером автора
+    # Если slug не передан, используем из конфига
+    if not slug:
+        slug = KICK_CHANNEL_SLUG
+    
+    channel_url = f"https://kick.com/{slug}"
+
     system_prompt = """Ты — автор телеграм-канала. Ты циничный, агрессивный и очень самоироничный человек.
 Ты презираешь фальшь, накрутки и «полезность». Ты открыто признаёшь свои слабости (лень, нежелание быть «мужиком»), и это делает твои тексты сильнее.
 Ты используешь мат как естественную часть речи (но не ради мата, а для усиления мысли).
 Ты не строишь из себя «крутого» — ты можешь написать, что тебе насрать на всех, но при этом сам сидишь и смотришь стримы.
-
-В твоём окружении есть Дианочка — рекламный агент, которая забирает 80% денег у стримеров, оставляя им 20%. Ты её ненавидишь и можешь вскользь упомянуть, но не зацикливайся на ней.
 
 Твоя задача — написать короткий пост (максимум 300 символов, 2 абзаца) о том, что стример по имени {slug} только что запустил стрим на Kick.
 Название стрима: "{title}".
@@ -29,12 +32,12 @@ async def generate_post(stream_title: str, viewer_count: int = 0) -> str:
 
 Только текст поста, без пояснений и кавычек."""
 
-    user_prompt = f"Стример {KICK_CHANNEL_SLUG} запустил стрим. Название: «{stream_title}». Зрителей на старте: {viewer_count}. Напиши пост."
+    user_prompt = f"Стример {slug} запустил стрим. Название: «{stream_title}». Зрителей на старте: {viewer_count}. Напиши пост."
 
     payload = {
         "model": "deepseek-chat",
         "messages": [
-            {"role": "system", "content": system_prompt.format(slug=KICK_CHANNEL_SLUG, title=stream_title)},
+            {"role": "system", "content": system_prompt.format(slug=slug, title=stream_title)},
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 1.0,
@@ -57,11 +60,14 @@ async def generate_post(stream_title: str, viewer_count: int = 0) -> str:
             data = response.json()
             content = data["choices"][0]["message"]["content"].strip()
             
-            # Простая очистка от возможных кавычек и лишних пробелов
+            # Очистка от кавычек
             content = content.strip('"').strip("«").strip("»").strip()
             
-            logger.info(f"✅ Пост сгенерирован ({len(content)} символов)")
-            return content
+            # Добавляем ссылку в начало поста
+            final_post = f"{channel_url}\n\n{content}"
+            
+            logger.info(f"✅ Пост сгенерирован ({len(final_post)} символов)")
+            return final_post
 
     except Exception as e:
         logger.error(f"❌ Ошибка при генерации через DeepSeek: {e}")
