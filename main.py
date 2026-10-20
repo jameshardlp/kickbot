@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from config import check_config, KICK_CLIENT_ID, KICK_CLIENT_SECRET, KICK_CHANNEL_SLUG
 from kick_webhook import router as kick_router
-from handler import process_new_stream  # <-- Импортируем из нового модуля
+from handler import process_new_stream
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,6 +60,10 @@ async def check_stream_status():
                         stream = channel.get("stream")
                         
                         if stream and stream.get("is_live"):
+                            # ===== ВРЕМЕННЫЙ ЛОГ ДЛЯ ДИАГНОСТИКИ =====
+                            logger.info(f"🔍 СЫРОЙ ОТВЕТ KICK (stream): {stream}")
+                            # =========================================
+                            
                             stream_id = str(stream.get("id"))
                             
                             if stream_id != last_stream_id:
@@ -136,7 +140,6 @@ async def subscribe_to_kick_events():
 @app.on_event("startup")
 async def startup_event():
     await subscribe_to_kick_events()
-    # Запускаем polling в фоне
     asyncio.create_task(check_stream_status())
     logger.info("🚀 Polling запущен (проверка каждые 2 минуты).")
 
