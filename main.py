@@ -45,6 +45,8 @@ async def check_stream_status():
             if not all_slugs:
                 all_slugs = ["maddyson"]
 
+            logger.info(f"🔍 Проверяю slug'и: {all_slugs}")
+
             for slug in all_slugs:
                 try:
                     resp = await kick_request_with_retry(
@@ -110,7 +112,8 @@ async def telegram_polling():
     offset = 0
     while True:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            # Увеличенный таймаут для long polling
+            async with httpx.AsyncClient(timeout=httpx.Timeout(40.0, connect=10.0)) as client:
                 resp = await client.get(
                     f"{TELEGRAM_API_URL}/getUpdates",
                     params={
@@ -186,6 +189,7 @@ async def telegram_polling():
                         chat_id = message["chat"]["id"]
                         user_id = message["from"]["id"]
                         
+                        # Команда /стример
                         if text.startswith("/стример"):
                             parts = text.split(maxsplit=1)
                             if len(parts) < 2:
@@ -211,6 +215,7 @@ async def telegram_polling():
                                 json={"chat_id": chat_id, "text": f"✅ Теперь отслеживаю: {slug}\n🔗 https://kick.com/{slug}"}
                             )
                         
+                        # Команда /статус
                         elif text.startswith("/статус"):
                             slug = get_user_slug(user_id) or "maddyson (по умолчанию)"
                             await client.post(
@@ -220,6 +225,31 @@ async def telegram_polling():
                                     "text": f"📡 Твой стример: {slug}\n🔗 https://kick.com/{slug}"
                                 }
                             )
+                        
+                        # Команда /сброс
+                        elif text.startswith("/сброс"):
+                            from database import get_stream_state, set_stream_state
+                            # Сбрасываем stream_state для всех slug'ов, которые есть в базе
+                            user_slugs = set(slug for _, slug in get_all_users())
+                            channel_slugs = set(slug for _, slug, _ in get_all_channels())
+                            all_slugs = user_slugs | channel_slugs
+                            
+                            for slug in all_slugs:
+                                set_stream_state(slug, None)
+                            
+                            # Если в списке есть maddyson (дефолт), но пользователь его не выбирал — 
+                            # просто сбрасываем состояние, не удаляя из базы
+                            if "maddyson" in all_slugs:
+                                set_stream_state("maddyson", None)
+                            
+                            await client.post(
+                                f"{TELEGRAM_API_URL}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": f"🔄 Состояние сброшено для {len(all_slugs)} стримеров. Следующий цикл polling увидит стримы как новые."
+                                }
+                            )
+                            logger.info(f"🔄 Пользователь {user_id} сбросил состояние стримов.")
                             
         except Exception as e:
             logger.error(f"❌ Ошибка в Telegram polling: {type(e).__name__}: {e}")
