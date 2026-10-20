@@ -5,123 +5,129 @@ import httpx
 import asyncio
 from fastapi import FastAPI
 
-from config import check_config, KICK_CLIENT_ID, KICK_CLIENT_SECRET, TELEGRAM_BOT_TOKEN
+from config import check_config, TELEGRAM_BOT_TOKEN
 from kick_webhook import router as kick_router
 from handler import process_new_stream
 from state import get_current_slug, set_current_slug, get_last_stream_id, set_last_stream_id
+from database import init_db, set_user_slug, get_user_slug, get_unique_slugs, get_all_users
+from kick_client import get_kick_token, kick_request_with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 check_config()
+init_db()
 
 app = FastAPI(title="Kick Alert Bot")
 app.include_router(kick_router)
 
-# Глобальные переменные
-last_stream_id = get_last_stream_id()  # <-- загружаем из файла при старте
-current_slug = get_current_slug()
+# Глобальные переменные для защиты от дублей (по slug)
+last_stream_ids = {}  # {slug: stream_id}
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-async def get_kick_token():
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://id.kick.com/oauth/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": KICK_CLIENT_ID,
-                "client_secret": KICK_CLIENT_SECRET,
-            }
-        )
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
-        logger.error(f"❌ Ошибка получения токена: {resp.status_code}")
-        return None
-
 async def check_stream_status():
-    global last_stream_id, current_slug
-    token = await get_kick_token()
-    if not token:
-        return
-
-    headers = {"Authorization": f"Bearer {token}"}
-    
+    """Фоновая задача: проверяет статусы стримов для уникальных slug'ов из БД (макс 60)."""
     while True:
         try:
-            current_slug = get_current_slug()
-            
-            async with httpx.AsyncClient(timeout=30) as client:
-                ch_resp = await client.get(
-                    f"https://api.kick.com/public/v1/channels?slug={current_slug}",
-                    headers=headers
-                )
-                
-                if ch_resp.status_code == 200:
-                    data = ch_resp.json().get("data", [])
-                    if data:
-                        channel = data[0]
-                        stream = channel.get("stream")
-                        
-                        if stream and stream.get("is_live"):
-                            stream_id = stream.get("start_time")
-                            
-                            if not stream_id:
-                                logger.warning("⚠️ Не удалось определить ID стрима (нет start_time).")
-                                await asyncio.sleep(120)
-                                continue
+            token = await get_kick_token()
+            if not token:
+                await asyncio.sleep(120)
+                continue
 
-                            if stream_id != last_stream_id:
-                                logger.info(f"🔴 [POLLING] Обнаружен стрим! ID: {stream_id} (канал: {current_slug})")
+            headers = {"Authorization": f"Bearer {token}"}
+            
+            # Получаем до 60 уникальных slug'ов из базы
+            slugs = get_unique_slugs(limit=60)
+            
+            # Если база пуста (новый бот), проверяем дефолтного maddyson
+            if not slugs:
+                slugs = ["maddyson"]
+
+            for slug in slugs:
+                try:
+                    resp = await kick_request_with_retry(
+                        "GET",
+                        f"https://api.kick.com/public/v1/channels?slug={slug}",
+                        headers=headers
+                    )
+                    
+                    if resp and resp.status_code == 200:
+                        data = resp.json().get("data", [])
+                        if data:
+                            channel = data[0]
+                            stream = channel.get("stream")
+                            
+                            if stream and stream.get("is_live"):
+                                stream_id = stream.get("start_time")
                                 
-                                title = "Новый стрим"
-                                thumbnail_url = stream.get("thumbnail")
-                                viewers = stream.get("viewer_count", 0)
-                                
-                                await process_new_stream(stream_id, title, thumbnail_url, viewers)
-                                
-                                last_stream_id = stream_id
-                                set_last_stream_id(stream_id)  # <-- сохраняем в файл
-                        else:
-                            if last_stream_id is not None:
-                                logger.info("⚫ Стрим закончился. Ждём следующий.")
-                                last_stream_id = None
-                                set_last_stream_id(None)  # <-- сбрасываем в файле
-                                
+                                if not stream_id:
+                                    continue
+
+                                # Проверяем, не обрабатывали ли мы уже этот стрим для этого slug
+                                if last_stream_ids.get(slug) != stream_id:
+                                    logger.info(f"🔴 [POLLING] Обнаружен стрим! ID: {stream_id} (канал: {slug})")
+                                    
+                                    title = "Новый стрим"
+                                    thumbnail_url = stream.get("thumbnail")
+                                    viewers = stream.get("viewer_count", 0)
+                                    
+                                    # Находим всех пользователей, которые следят за этим slug
+                                    all_users = get_all_users()
+                                    users_to_notify = [uid for uid, uslug in all_users if uslug == slug]
+                                    
+                                    if users_to_notify:
+                                        # Отправляем пост каждому (в реальности здесь нужно слать в ЛС, 
+                                        # но пока у нас нет chat_id в базе, поэтому шлем в общий канал)
+                                        await process_new_stream(stream_id, title, thumbnail_url, viewers)
+                                    else:
+                                        # Если никто не следит, но это дефолтный maddyson, шлем в общий канал
+                                        if slug == "maddyson":
+                                            await process_new_stream(stream_id, title, thumbnail_url, viewers)
+                                    
+                                    last_stream_ids[slug] = stream_id
+                                    set_last_stream_id(stream_id)
+                            else:
+                                if last_stream_ids.get(slug) is not None:
+                                    logger.info(f"⚫ Стрим {slug} закончился.")
+                                    last_stream_ids[slug] = None
+                                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при проверке {slug}: {e}")
+                
+                # Небольшая пауза между запросами к разным стримерам, чтобы не долбить API
+                await asyncio.sleep(1)
+                
         except Exception as e:
             logger.error(f"❌ Ошибка в polling: {e}")
         
-        await asyncio.sleep(120)
+        await asyncio.sleep(120)  # Ждём 2 минуты перед следующим циклом
 
 async def subscribe_to_kick_events():
+    """Подписка на события Kick (вебхук) для текущего канала."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            token_resp = await client.post(
-                "https://id.kick.com/oauth/token",
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": KICK_CLIENT_ID,
-                    "client_secret": KICK_CLIENT_SECRET,
-                }
-            )
-            if token_resp.status_code != 200:
-                logger.error(f"❌ Ошибка получения токена Kick: {token_resp.status_code}")
-                return
-            access_token = token_resp.json().get("access_token")
-            headers = {"Authorization": f"Bearer {access_token}"}
-
-            slug = get_current_slug()
-            ch_resp = await client.get(
-                f"https://api.kick.com/public/v1/channels?slug={slug}",
-                headers=headers
-            )
-            channels = ch_resp.json().get("data", [])
+        token = await get_kick_token()
+        if not token:
+            return
+            
+        headers = {"Authorization": f"Bearer {token}"}
+        slug = get_current_slug()
+        
+        resp = await kick_request_with_retry(
+            "GET",
+            f"https://api.kick.com/public/v1/channels?slug={slug}",
+            headers=headers
+        )
+        
+        if resp and resp.status_code == 200:
+            channels = resp.json().get("data", [])
             if not channels:
                 logger.error(f"❌ Канал {slug} не найден.")
                 return
             broadcaster_id = channels[0].get("broadcaster_user_id")
             
-            sub_resp = await client.post(
+            sub_resp = await kick_request_with_retry(
+                "POST",
                 "https://api.kick.com/public/v1/events/subscriptions",
                 headers=headers,
                 json={
@@ -130,16 +136,18 @@ async def subscribe_to_kick_events():
                     "events": [{"name": "livestream.status.updated", "version": 1}]
                 }
             )
-            if sub_resp.status_code in (200, 201):
-                logger.info(f"✅ Подписка активна: {sub_resp.text}")
-            elif sub_resp.status_code == 409:
-                logger.info("ℹ️ Подписка уже существует.")
+            
+            if sub_resp and sub_resp.status_code in (200, 201):
+                logger.info(f"✅ Подписка активна для {slug}: {sub_resp.text}")
+            elif sub_resp and sub_resp.status_code == 409:
+                logger.info(f"ℹ️ Подписка для {slug} уже существует.")
             else:
-                logger.error(f"❌ Ошибка подписки: {sub_resp.status_code} — {sub_resp.text}")
+                logger.error(f"❌ Ошибка подписки: {sub_resp.status_code if sub_resp else 'None'}")
     except Exception as e:
         logger.error(f"❌ Исключение при подписке: {e}")
 
 async def telegram_polling():
+    """Слушает команды от пользователей в ЛС."""
     offset = 0
     while True:
         try:
@@ -158,6 +166,7 @@ async def telegram_polling():
                         
                         text = message.get("text", "")
                         chat_id = message["chat"]["id"]
+                        user_id = message["from"]["id"]
                         
                         # Команда /стример <ссылка>
                         if text.startswith("/стример"):
@@ -182,29 +191,27 @@ async def telegram_polling():
                                 )
                                 continue
                             
-                            set_current_slug(slug)
-                            # Сбрасываем last_stream_id, чтобы новый стрим точно обработался
-                            set_last_stream_id(None)
-                            global last_stream_id
-                            last_stream_id = None
+                            # Сохраняем в базу
+                            set_user_slug(user_id, slug)
                             
                             await client.post(
                                 f"{TELEGRAM_API_URL}/sendMessage",
                                 json={"chat_id": chat_id, "text": f"✅ Теперь отслеживаю канал: {slug}\nСсылка: https://kick.com/{slug}"}
                             )
-                            logger.info(f"🔄 Пользователь сменил стримера на: {slug}")
+                            logger.info(f"🔄 Пользователь {user_id} сменил стримера на: {slug}")
                             
+                            # Переподписываемся на вебхуки (если это текущий глобальный канал)
+                            set_current_slug(slug)
                             await subscribe_to_kick_events()
                         
                         # Команда /статус
                         elif text.startswith("/статус"):
-                            slug = get_current_slug()
-                            sid = get_last_stream_id() or "нет (стрим не обнаружен)"
+                            slug = get_user_slug(user_id) or "maddyson (по умолчанию)"
                             await client.post(
                                 f"{TELEGRAM_API_URL}/sendMessage",
                                 json={
                                     "chat_id": chat_id,
-                                    "text": f"📡 Текущий канал: {slug}\n🔗 https://kick.com/{slug}\n🎬 Последний стрим: {sid}"
+                                    "text": f"📡 Твой текущий канал: {slug}\n🔗 https://kick.com/{slug}"
                                 }
                             )
                             
@@ -218,7 +225,7 @@ async def startup_event():
     await subscribe_to_kick_events()
     asyncio.create_task(check_stream_status())
     asyncio.create_task(telegram_polling())
-    logger.info("🚀 Polling запущен (проверка каждые 2 минуты) и Telegram polling.")
+    logger.info("🚀 Polling запущен (макс 60 уникальных стримеров) и Telegram polling.")
 
 @app.get("/")
 async def root():
