@@ -10,7 +10,8 @@ from kick_webhook import router as kick_router
 from handler import process_new_stream
 from database import (
     init_db, set_user_slug, get_user_slug, get_all_users,
-    set_channel_slug, get_all_channels, remove_channel
+    set_channel_slug, get_all_channels, remove_channel,
+    get_stream_state, set_stream_state
 )
 from kick_client import get_kick_token, kick_request_with_retry
 
@@ -24,9 +25,6 @@ app = FastAPI(title="Kick Alert Bot")
 app.include_router(kick_router)
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
-# Защита от дублей: {slug: stream_id}
-last_stream_ids = {}
 
 async def check_stream_status():
     """Проверяет статусы для всех уникальных slug из users + channels (макс 60)."""
@@ -66,32 +64,36 @@ async def check_stream_status():
                                 if not stream_id:
                                     continue
 
-                                if last_stream_ids.get(slug) != stream_id:
+                                # Проверяем, не обрабатывали ли мы уже этот стрим (из БД!)
+                                last_id = get_stream_state(slug)
+                                if last_id != stream_id:
                                     logger.info(f"🔴 Обнаружен стрим {slug}! ID: {stream_id}")
                                     
                                     title = "Новый стрим"
                                     thumbnail_url = stream.get("thumbnail")
                                     viewers = stream.get("viewer_count", 0)
                                     
-                                    # 1. Отправляем всем пользователям, следящим за этим slug
+                                    # 1. Пользователи в ЛС
                                     for user_id, uslug in get_all_users():
                                         if uslug == slug:
                                             await process_new_stream(
                                                 user_id, stream_id, title, thumbnail_url, viewers, slug
                                             )
                                     
-                                    # 2. Отправляем во все каналы, привязанные к этому slug
+                                    # 2. Каналы
                                     for chat_id, cslug, _ in get_all_channels():
                                         if cslug == slug:
                                             await process_new_stream(
                                                 chat_id, stream_id, title, thumbnail_url, viewers, slug
                                             )
                                     
-                                    last_stream_ids[slug] = stream_id
+                                    # Сохраняем в БД!
+                                    set_stream_state(slug, stream_id)
                             else:
-                                if last_stream_ids.get(slug) is not None:
+                                # Стрим закончился — сбрасываем состояние в БД
+                                if get_stream_state(slug) is not None:
                                     logger.info(f"⚫ Стрим {slug} закончился.")
-                                    last_stream_ids[slug] = None
+                                    set_stream_state(slug, None)
                                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка при проверке {slug}: {e}")
@@ -109,7 +111,6 @@ async def telegram_polling():
     while True:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # allowed_updates: message (ЛС), channel_post (каналы), my_chat_member (добавление бота)
                 resp = await client.get(
                     f"{TELEGRAM_API_URL}/getUpdates",
                     params={
@@ -123,7 +124,7 @@ async def telegram_polling():
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
                         
-                        # --- 1. my_chat_member: бота добавили в канал/группу ---
+                        # my_chat_member
                         if "my_chat_member" in update:
                             mcm = update["my_chat_member"]
                             chat = mcm["chat"]
@@ -131,13 +132,12 @@ async def telegram_polling():
                             
                             if new_status in ("administrator", "member"):
                                 logger.info(f"🆕 Бот добавлен в чат: {chat.get('title', chat['id'])} ({chat['id']})")
-                                # Привязываем к maddyson по умолчанию (пользователь может сменить)
                                 set_channel_slug(chat["id"], "maddyson", chat.get("title", ""))
                                 await client.post(
                                     f"{TELEGRAM_API_URL}/sendMessage",
                                     json={
                                         "chat_id": chat["id"],
-                                        "text": "✅ Бот добавлен! По умолчанию отслеживаю **maddyson**.\nЧтобы сменить стримера, напиши в этот канал: `/стример https://kick.com/username`"
+                                        "text": "✅ Бот добавлен! По умолчанию отслеживаю **maddyson**.\nЧтобы сменить стримера, напиши: `/стример https://kick.com/username`"
                                     }
                                 )
                             elif new_status in ("left", "kicked"):
@@ -145,7 +145,7 @@ async def telegram_polling():
                                 remove_channel(chat["id"])
                             continue
 
-                        # --- 2. channel_post: сообщение в канале (команда от админа) ---
+                        # channel_post
                         if "channel_post" in update:
                             post = update["channel_post"]
                             text = post.get("text", "")
@@ -175,10 +175,9 @@ async def telegram_polling():
                                     f"{TELEGRAM_API_URL}/sendMessage",
                                     json={"chat_id": chat_id, "text": f"✅ Канал привязан к стримеру: {slug}"}
                                 )
-                                logger.info(f"📢 Канал {chat_id} теперь отслеживает {slug}")
                             continue
 
-                        # --- 3. message: ЛС от пользователя ---
+                        # message (ЛС)
                         message = update.get("message")
                         if not message:
                             continue
@@ -211,7 +210,6 @@ async def telegram_polling():
                                 f"{TELEGRAM_API_URL}/sendMessage",
                                 json={"chat_id": chat_id, "text": f"✅ Теперь отслеживаю: {slug}\n🔗 https://kick.com/{slug}"}
                             )
-                            logger.info(f"🔄 Пользователь {user_id} -> {slug}")
                         
                         elif text.startswith("/статус"):
                             slug = get_user_slug(user_id) or "maddyson (по умолчанию)"
@@ -224,7 +222,7 @@ async def telegram_polling():
                             )
                             
         except Exception as e:
-            logger.error(f"❌ Ошибка в Telegram polling: {e}")
+            logger.error(f"❌ Ошибка в Telegram polling: {type(e).__name__}: {e}")
         
         await asyncio.sleep(2)
 
@@ -232,7 +230,7 @@ async def telegram_polling():
 async def startup_event():
     asyncio.create_task(check_stream_status())
     asyncio.create_task(telegram_polling())
-    logger.info("🚀 Polling запущен (users + channels) и Telegram polling.")
+    logger.info("🚀 Polling запущен (users + channels + stream_state) и Telegram polling.")
 
 @app.get("/")
 async def root():
