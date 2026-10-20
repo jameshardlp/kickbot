@@ -28,12 +28,18 @@ def init_db():
             updated_at INTEGER NOT NULL
         )
     """)
+    # Таблица состояний стримов (чтобы не дублировать посты после перезапуска)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stream_state (
+            slug TEXT PRIMARY KEY,
+            stream_id TEXT
+        )
+    """)
     conn.commit()
     conn.close()
-    logger.info("✅ База данных инициализирована (users + channels).")
+    logger.info("✅ База данных инициализирована (users + channels + stream_state).")
 
 # --- Пользователи (ЛС) ---
-
 def set_user_slug(user_id: int, slug: str):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -74,9 +80,7 @@ def get_all_users() -> List[Tuple[int, str]]:
     return rows
 
 # --- Каналы (бот-админ) ---
-
 def set_channel_slug(chat_id: int, slug: str, title: str = ""):
-    """Привязывает канал к стримеру."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     now = int(time.time())
@@ -91,16 +95,7 @@ def set_channel_slug(chat_id: int, slug: str, title: str = ""):
     conn.commit()
     conn.close()
 
-def get_channel_slug(chat_id: int) -> Optional[str]:
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT kick_slug FROM channels WHERE chat_id = ?", (chat_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else None
-
 def get_all_channels() -> List[Tuple[int, str, str]]:
-    """Возвращает (chat_id, kick_slug, title)."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT chat_id, kick_slug, title FROM channels")
@@ -112,5 +107,30 @@ def remove_channel(chat_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM channels WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+# --- Состояние стримов (защита от дублей) ---
+def get_stream_state(slug: str) -> Optional[str]:
+    """Возвращает последний обработанный stream_id для slug."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT stream_id FROM stream_state WHERE slug = ?", (slug,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_stream_state(slug: str, stream_id: Optional[str]):
+    """Сохраняет stream_id для slug (или сбрасывает, если None)."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    if stream_id:
+        cursor.execute("""
+            INSERT INTO stream_state (slug, stream_id)
+            VALUES (?, ?)
+            ON CONFLICT(slug) DO UPDATE SET stream_id = excluded.stream_id
+        """, (slug, stream_id))
+    else:
+        cursor.execute("DELETE FROM stream_state WHERE slug = ?", (slug,))
     conn.commit()
     conn.close()
