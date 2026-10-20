@@ -1,15 +1,14 @@
 import sqlite3
 import logging
 import time
-from typing import Optional
+from typing import Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
 DB_FILE = "bot_database.db"
-MAX_USERS = 200  # Максимальное количество пользователей в базе
+MAX_USERS = 200  # Максимум пользователей в базе
 
 def init_db():
-    """Создаёт таблицу users, если её нет."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
@@ -24,7 +23,6 @@ def init_db():
     logger.info("✅ База данных инициализирована.")
 
 def set_user_slug(user_id: int, slug: str):
-    """Сохраняет или обновляет slug для пользователя."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     now = int(time.time())
@@ -42,7 +40,6 @@ def set_user_slug(user_id: int, slug: str):
     count = cursor.fetchone()[0]
     
     if count > MAX_USERS:
-        # Удаляем самого старого пользователя (по updated_at)
         cursor.execute("""
             DELETE FROM users
             WHERE user_id IN (
@@ -55,7 +52,6 @@ def set_user_slug(user_id: int, slug: str):
     conn.close()
 
 def get_user_slug(user_id: int) -> Optional[str]:
-    """Возвращает slug пользователя или None, если его нет в базе."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT kick_slug FROM users WHERE user_id = ?", (user_id,))
@@ -63,8 +59,7 @@ def get_user_slug(user_id: int) -> Optional[str]:
     conn.close()
     return row[0] if row else None
 
-def get_all_users() -> list[tuple[int, str]]:
-    """Возвращает список всех пользователей (user_id, kick_slug)."""
+def get_all_users() -> List[Tuple[int, str]]:
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, kick_slug FROM users")
@@ -72,8 +67,21 @@ def get_all_users() -> list[tuple[int, str]]:
     conn.close()
     return rows
 
+def get_unique_slugs(limit: int = 60) -> List[str]:
+    """Возвращает список уникальных slug'ов (не более limit)."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # Берем последние limit записей по updated_at, чтобы проверять самых активных
+    cursor.execute("""
+        SELECT DISTINCT kick_slug FROM users
+        ORDER BY updated_at DESC
+        LIMIT ?
+    """, (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
 def delete_user(user_id: int):
-    """Удаляет пользователя из базы (например, по команде /стоп)."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
