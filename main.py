@@ -60,22 +60,26 @@ async def check_stream_status():
                         stream = channel.get("stream")
                         
                         if stream and stream.get("is_live"):
-                            # ===== ВРЕМЕННЫЙ ЛОГ ДЛЯ ДИАГНОСТИКИ =====
                             logger.info(f"🔍 СЫРОЙ ОТВЕТ KICK (stream): {stream}")
-                            # =========================================
                             
-                            stream_id = str(stream.get("id"))
+                            # Используем start_time как уникальный ID стрима
+                            stream_id = stream.get("start_time")
                             
+                            if not stream_id:
+                                logger.warning("⚠️ Не удалось определить ID стрима (нет start_time).")
+                                await asyncio.sleep(120)
+                                continue
+
                             if stream_id != last_stream_id:
                                 logger.info(f"🔴 [POLLING] Обнаружен стрим! ID: {stream_id}")
                                 
-                                # Извлекаем данные
-                                title = stream.get("session_title", "Без названия")
-                                thumb = stream.get("thumbnail", {})
-                                thumbnail_url = thumb.get("url") if isinstance(thumb, dict) else None
+                                # Названия в этом ответе нет, используем заглушку
+                                title = "Новый стрим"
+                                
+                                # Превью лежит прямо в stream["thumbnail"] как строка
+                                thumbnail_url = stream.get("thumbnail")
                                 viewers = stream.get("viewer_count", 0)
                                 
-                                # Запускаем обработку
                                 await process_new_stream(stream_id, title, thumbnail_url, viewers)
                                 
                                 last_stream_id = stream_id
