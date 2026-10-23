@@ -7,11 +7,12 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = "bot_database.db"
 MAX_USERS = 200
+MAX_OWNERS = 3
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Таблица пользователей (ЛС)
+    # Пользователи (ЛС) — те, кто получает посты
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -19,7 +20,7 @@ def init_db():
             updated_at INTEGER NOT NULL
         )
     """)
-    # Таблица каналов (куда бот добавлен админом)
+    # Каналы (куда бот добавлен админом)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             chat_id INTEGER PRIMARY KEY,
@@ -28,18 +29,25 @@ def init_db():
             updated_at INTEGER NOT NULL
         )
     """)
-    # Таблица состояний стримов (чтобы не дублировать посты после перезапуска)
+    # Состояние стримов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS stream_state (
             slug TEXT PRIMARY KEY,
             stream_id TEXT
         )
     """)
+    # Владельцы (до 3 человек, кто может настраивать бота)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS owners (
+            user_id INTEGER PRIMARY KEY,
+            added_at INTEGER NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
-    logger.info("✅ База данных инициализирована (users + channels + stream_state).")
+    logger.info("✅ База данных инициализирована (users + channels + stream_state + owners).")
 
-# --- Пользователи (ЛС) ---
+# --- Пользователи ---
 def set_user_slug(user_id: int, slug: str):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -79,7 +87,7 @@ def get_all_users() -> List[Tuple[int, str]]:
     conn.close()
     return rows
 
-# --- Каналы (бот-админ) ---
+# --- Каналы ---
 def set_channel_slug(chat_id: int, slug: str, title: str = ""):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -110,9 +118,8 @@ def remove_channel(chat_id: int):
     conn.commit()
     conn.close()
 
-# --- Состояние стримов (защита от дублей) ---
+# --- Состояние стримов ---
 def get_stream_state(slug: str) -> Optional[str]:
-    """Возвращает последний обработанный stream_id для slug."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT stream_id FROM stream_state WHERE slug = ?", (slug,))
@@ -121,7 +128,6 @@ def get_stream_state(slug: str) -> Optional[str]:
     return row[0] if row else None
 
 def set_stream_state(slug: str, stream_id: Optional[str]):
-    """Сохраняет stream_id для slug (или сбрасывает, если None)."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     if stream_id:
@@ -134,3 +140,47 @@ def set_stream_state(slug: str, stream_id: Optional[str]):
         cursor.execute("DELETE FROM stream_state WHERE slug = ?", (slug,))
     conn.commit()
     conn.close()
+
+# --- Владельцы ---
+def add_owner(user_id: int) -> bool:
+    """Добавляет владельца. Возвращает False, если лимит (3) превышен."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # Проверяем, не владелец ли уже
+    cursor.execute("SELECT 1 FROM owners WHERE user_id = ?", (user_id,))
+    if cursor.fetchone():
+        conn.close()
+        return True  # уже есть
+    # Проверяем лимит
+    cursor.execute("SELECT COUNT(*) FROM owners")
+    count = cursor.fetchone()[0]
+    if count >= MAX_OWNERS:
+        conn.close()
+        return False
+    cursor.execute("INSERT INTO owners (user_id, added_at) VALUES (?, ?)", (user_id, int(time.time())))
+    conn.commit()
+    conn.close()
+    return True
+
+def remove_owner(user_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM owners WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_owner(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM owners WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def get_all_owners() -> List[int]:
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM owners ORDER BY added_at")
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
