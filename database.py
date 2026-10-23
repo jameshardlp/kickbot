@@ -12,7 +12,6 @@ MAX_OWNERS = 3
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Пользователи (ЛС) — те, кто получает посты
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -20,7 +19,6 @@ def init_db():
             updated_at INTEGER NOT NULL
         )
     """)
-    # Каналы (куда бот добавлен админом)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             chat_id INTEGER PRIMARY KEY,
@@ -29,14 +27,12 @@ def init_db():
             updated_at INTEGER NOT NULL
         )
     """)
-    # Состояние стримов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS stream_state (
             slug TEXT PRIMARY KEY,
             stream_id TEXT
         )
     """)
-    # Владельцы (до 3 человек, кто может настраивать бота)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS owners (
             user_id INTEGER PRIMARY KEY,
@@ -143,15 +139,12 @@ def set_stream_state(slug: str, stream_id: Optional[str]):
 
 # --- Владельцы ---
 def add_owner(user_id: int) -> bool:
-    """Добавляет владельца. Возвращает False, если лимит (3) превышен."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Проверяем, не владелец ли уже
     cursor.execute("SELECT 1 FROM owners WHERE user_id = ?", (user_id,))
     if cursor.fetchone():
         conn.close()
-        return True  # уже есть
-    # Проверяем лимит
+        return True
     cursor.execute("SELECT COUNT(*) FROM owners")
     count = cursor.fetchone()[0]
     if count >= MAX_OWNERS:
