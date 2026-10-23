@@ -124,7 +124,7 @@ async def telegram_polling():
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
                         
-                        # my_chat_member
+                        # my_chat_member (добавление бота в канал)
                         if "my_chat_member" in update:
                             mcm = update["my_chat_member"]
                             chat = mcm["chat"]
@@ -137,7 +137,8 @@ async def telegram_polling():
                                     f"{TELEGRAM_API_URL}/sendMessage",
                                     json={
                                         "chat_id": chat["id"],
-                                        "text": "✅ Бот добавлен! По умолчанию отслеживаю **maddyson**.\nЧтобы сменить стримера, напиши: `/стример https://kick.com/username`"
+                                        "text": "✅ Бот добавлен! По умолчанию отслеживаю **maddyson**.\n"
+                                                "Владелец может сменить стримера через ЛС: /стример <ID чата> <ссылка>"
                                     }
                                 )
                             elif new_status in ("left", "kicked"):
@@ -145,36 +146,9 @@ async def telegram_polling():
                                 remove_channel(chat["id"])
                             continue
 
-                        # channel_post
+                        # channel_post (команды в канале — только для владельца, но проще игнорировать)
                         if "channel_post" in update:
-                            post = update["channel_post"]
-                            text = post.get("text", "")
-                            chat_id = post["chat"]["id"]
-                            
-                            if text.startswith("/стример"):
-                                parts = text.split(maxsplit=1)
-                                if len(parts) < 2:
-                                    await client.post(
-                                        f"{TELEGRAM_API_URL}/sendMessage",
-                                        json={"chat_id": chat_id, "text": "❌ Укажи ссылку: /стример https://kick.com/username"}
-                                    )
-                                    continue
-                                
-                                link = parts[1].strip()
-                                slug = link.split("kick.com/")[-1].strip("/") if "kick.com/" in link else link.strip("/")
-                                
-                                if not slug:
-                                    await client.post(
-                                        f"{TELEGRAM_API_URL}/sendMessage",
-                                        json={"chat_id": chat_id, "text": "❌ Не удалось извлечь имя стримера."}
-                                    )
-                                    continue
-                                
-                                set_channel_slug(chat_id, slug, post["chat"].get("title", ""))
-                                await client.post(
-                                    f"{TELEGRAM_API_URL}/sendMessage",
-                                    json={"chat_id": chat_id, "text": f"✅ Канал привязан к стримеру: {slug}"}
-                                )
+                            # Мы не обрабатываем команды в канале, чтобы не путать
                             continue
 
                         # message (ЛС)
@@ -186,13 +160,114 @@ async def telegram_polling():
                         chat_id = message["chat"]["id"]
                         user_id = message["from"]["id"]
                         
-                        # /стример
+                        # --- Команда /стример ---
                         if text.startswith("/стример"):
+                            parts = text.split(maxsplit=2)
+                            owner = is_owner(user_id)
+                            
+                            if owner:
+                                # /стример <ID чата> <ссылка>
+                                if len(parts) < 3:
+                                    await client.post(
+                                        f"{TELEGRAM_API_URL}/sendMessage",
+                                        json={
+                                            "chat_id": chat_id,
+                                            "text": "❌ Формат для владельца: /стример <ID чата/канала> <ссылка на стримера>\n"
+                                                    "Пример: /стример -1001234567890 https://kick.com/maddyson\n\n"
+                                                    "Чтобы получать уведомления в ЛС, используйте: /я <ссылка>"
+                                        }
+                                    )
+                                    continue
+                                
+                                target_chat_str = parts[1].strip()
+                                link = parts[2].strip()
+                                
+                                try:
+                                    target_chat_id = int(target_chat_str)
+                                except ValueError:
+                                    await client.post(
+                                        f"{TELEGRAM_API_URL}/sendMessage",
+                                        json={"chat_id": chat_id, "text": "❌ ID чата должен быть числом (например, -1001234567890)."}
+                                    )
+                                    continue
+                                
+                                if "kick.com/" in link:
+                                    slug = link.split("kick.com/")[-1].strip("/")
+                                else:
+                                    slug = link.strip("/")
+                                
+                                if not slug:
+                                    await client.post(
+                                        f"{TELEGRAM_API_URL}/sendMessage",
+                                        json={"chat_id": chat_id, "text": "❌ Не удалось извлечь имя стримера из ссылки."}
+                                    )
+                                    continue
+                                
+                                set_channel_slug(target_chat_id, slug, f"Привязан владельцем {user_id}")
+                                await client.post(
+                                    f"{TELEGRAM_API_URL}/sendMessage",
+                                    json={
+                                        "chat_id": chat_id,
+                                        "text": f"✅ Чат/канал {target_chat_id} привязан к стримеру: {slug}\n"
+                                                f"🔗 https://kick.com/{slug}\n"
+                                                f"Бот будет отправлять уведомления туда."
+                                    }
+                                )
+                                logger.info(f"📢 Владелец {user_id} привязал чат {target_chat_id} к {slug}")
+                            
+                            else:
+                                # /стример <ссылка> — для обычного пользователя (ЛС)
+                                if len(parts) < 2:
+                                    await client.post(
+                                        f"{TELEGRAM_API_URL}/sendMessage",
+                                        json={
+                                            "chat_id": chat_id,
+                                            "text": "❌ Формат: /стример <ссылка на стримера>\n"
+                                                    "Пример: /стример https://kick.com/maddyson"
+                                        }
+                                    )
+                                    continue
+                                
+                                link = parts[1].strip()
+                                
+                                if "kick.com/" in link:
+                                    slug = link.split("kick.com/")[-1].strip("/")
+                                else:
+                                    slug = link.strip("/")
+                                
+                                if not slug:
+                                    await client.post(
+                                        f"{TELEGRAM_API_URL}/sendMessage",
+                                        json={"chat_id": chat_id, "text": "❌ Не удалось извлечь имя стримера."}
+                                    )
+                                    continue
+                                
+                                set_user_slug(user_id, slug)
+                                await client.post(
+                                    f"{TELEGRAM_API_URL}/sendMessage",
+                                    json={
+                                        "chat_id": chat_id,
+                                        "text": f"✅ Теперь вы будете получать уведомления о стримах: {slug}\n"
+                                                f"🔗 https://kick.com/{slug}"
+                                    }
+                                )
+                                logger.info(f"👤 Пользователь {user_id} подписался на {slug}")
+                            continue
+                        
+                        # --- Команда /я (только для владельцев) ---
+                        elif text.startswith("/я"):
+                            if not is_owner(user_id):
+                                await client.post(
+                                    f"{TELEGRAM_API_URL}/sendMessage",
+                                    json={"chat_id": chat_id, "text": "❌ Эта команда доступна только владельцам бота."}
+                                )
+                                continue
+                            
                             parts = text.split(maxsplit=1)
                             if len(parts) < 2:
                                 await client.post(
                                     f"{TELEGRAM_API_URL}/sendMessage",
-                                    json={"chat_id": chat_id, "text": "❌ Укажи ссылку: /стример https://kick.com/username"}
+                                    json={"chat_id": chat_id, "text": "❌ Укажи ссылку: /я https://kick.com/username"}
                                 )
                                 continue
                             
@@ -209,10 +284,15 @@ async def telegram_polling():
                             set_user_slug(user_id, slug)
                             await client.post(
                                 f"{TELEGRAM_API_URL}/sendMessage",
-                                json={"chat_id": chat_id, "text": f"✅ Теперь отслеживаю: {slug}\n🔗 https://kick.com/{slug}"}
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": f"✅ Твой личный стример: {slug}\n🔗 https://kick.com/{slug}"
+                                }
                             )
+                            logger.info(f"👑 Владелец {user_id} подписался на {slug} (личная)")
+                            continue
                         
-                        # /статус
+                        # --- Команда /статус ---
                         elif text.startswith("/статус"):
                             slug = get_user_slug(user_id) or "maddyson (по умолчанию)"
                             await client.post(
@@ -222,10 +302,10 @@ async def telegram_polling():
                                     "text": f"📡 Твой стример: {slug}\n🔗 https://kick.com/{slug}"
                                 }
                             )
+                            continue
                         
-                        # /сброс
+                        # --- Команда /сброс ---
                         elif text.startswith("/сброс"):
-                            from database import get_stream_state, set_stream_state
                             user_slugs = set(slug for _, slug in get_all_users())
                             channel_slugs = set(slug for _, slug, _ in get_all_channels())
                             all_slugs = user_slugs | channel_slugs
@@ -241,47 +321,9 @@ async def telegram_polling():
                                 }
                             )
                             logger.info(f"🔄 Пользователь {user_id} сбросил состояние стримов.")
+                            continue
                         
-                        # /канал <ID> или /чат <ID>
-                        elif text.startswith("/канал") or text.startswith("/чат"):
-                            if not is_owner(user_id):
-                                await client.post(
-                                    f"{TELEGRAM_API_URL}/sendMessage",
-                                    json={"chat_id": chat_id, "text": "❌ Эта команда доступна только владельцам бота."}
-                                )
-                                continue
-                            
-                            parts = text.split(maxsplit=1)
-                            if len(parts) < 2:
-                                await client.post(
-                                    f"{TELEGRAM_API_URL}/sendMessage",
-                                    json={"chat_id": chat_id, "text": "❌ Укажи ID чата или канала: /канал -1001234567890"}
-                                )
-                                continue
-                            
-                            target_id_str = parts[1].strip()
-                            try:
-                                target_id = int(target_id_str)
-                            except ValueError:
-                                await client.post(
-                                    f"{TELEGRAM_API_URL}/sendMessage",
-                                    json={"chat_id": chat_id, "text": "❌ ID должен быть числом (например, -1001234567890)."}
-                                )
-                                continue
-                            
-                            # Привязываем к текущему выбранному slug (или к maddyson по умолчанию)
-                            slug = get_user_slug(user_id) or "maddyson"
-                            set_channel_slug(target_id, slug, f"Привязан владельцем {user_id}")
-                            await client.post(
-                                f"{TELEGRAM_API_URL}/sendMessage",
-                                json={
-                                    "chat_id": chat_id,
-                                    "text": f"✅ Чат/канал {target_id} привязан к стримеру: {slug}\nБот будет отправлять уведомления туда."
-                                }
-                            )
-                            logger.info(f"📢 Владелец {user_id} привязал чат {target_id} к {slug}")
-                        
-                        # /owner <user_id> или /owner (список)
+                        # --- Команда /owner ---
                         elif text.startswith("/owner"):
                             if not is_owner(user_id):
                                 await client.post(
@@ -292,7 +334,6 @@ async def telegram_polling():
                             
                             parts = text.split(maxsplit=1)
                             if len(parts) < 2:
-                                # Показать список владельцев
                                 owners = get_all_owners()
                                 text_owners = "\n".join([f"• {oid}" for oid in owners])
                                 await client.post(
@@ -329,6 +370,48 @@ async def telegram_polling():
                                             "text": f"❌ Не удалось добавить: лимит владельцев ({3}) исчерпан."
                                         }
                                     )
+                            continue
+                        
+                        # --- Команда /канал и /чат (владельцы) ---
+                        elif text.startswith("/канал") or text.startswith("/чат"):
+                            if not is_owner(user_id):
+                                await client.post(
+                                    f"{TELEGRAM_API_URL}/sendMessage",
+                                    json={"chat_id": chat_id, "text": "❌ Эта команда доступна только владельцам бота."}
+                                )
+                                continue
+                            
+                            parts = text.split(maxsplit=1)
+                            if len(parts) < 2:
+                                await client.post(
+                                    f"{TELEGRAM_API_URL}/sendMessage",
+                                    json={"chat_id": chat_id, "text": "❌ Укажи ID чата или канала: /канал -1001234567890"}
+                                )
+                                continue
+                            
+                            target_id_str = parts[1].strip()
+                            try:
+                                target_id = int(target_id_str)
+                            except ValueError:
+                                await client.post(
+                                    f"{TELEGRAM_API_URL}/sendMessage",
+                                    json={"chat_id": chat_id, "text": "❌ ID должен быть числом (например, -1001234567890)."}
+                                )
+                                continue
+                            
+                            # Привязываем к текущему выбранному slug (или к maddyson по умолчанию)
+                            slug = get_user_slug(user_id) or "maddyson"
+                            set_channel_slug(target_id, slug, f"Привязан владельцем {user_id}")
+                            await client.post(
+                                f"{TELEGRAM_API_URL}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": f"✅ Чат/канал {target_id} привязан к стримеру: {slug}\n"
+                                            f"Бот будет отправлять уведомления туда."
+                                }
+                            )
+                            logger.info(f"📢 Владелец {user_id} привязал чат {target_id} к {slug}")
+                            continue
                             
         except Exception as e:
             logger.error(f"❌ Ошибка в Telegram polling: {type(e).__name__}: {e}")
